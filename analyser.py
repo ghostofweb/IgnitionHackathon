@@ -1,52 +1,86 @@
-from flask import Flask, render_template, request
+import pandas as pd
 import requests
+import matplotlib.pyplot as plt
+import plotly.graph_objs as go
+import io
+import base64
 
-app = Flask(__name__)
+class StockAnalyzer:
+    def __init__(self, symbol):
+        self.symbol = symbol.upper()
+        self.api_key = "HTS6MW8HZHVH04MK"
+        self.base_url = "https://www.alphavantage.co/query"
+        self.data = None
 
-# Replace with your Alpha Vantage API Key
-API_KEY = "HTS6MW8HZHVH04MK"
-BASE_URL = "https://www.alphavantage.co/query"
+    def fetch_data(self):
+        params = {
+            "function": "TIME_SERIES_DAILY",
+            "symbol": self.symbol,
+            "outputsize": "compact",
+            "apikey": self.api_key
+        }
+        response = requests.get(self.base_url, params=params)
+        raw_data = response.json()
 
-@app.route('/')
-def home():
-    return render_template('index.html')
+        if "Time Series (Daily)" not in raw_data:
+            raise Exception("API Error or invalid symbol.")
 
-@app.route('/analyze', methods=['POST'])
-def analyze():
-    stock_symbol = request.form.get("stock_symbol")
-    if not stock_symbol:
-        return "Please provide a stock symbol.", 400
+        df = pd.DataFrame(raw_data["Time Series (Daily)"]).T
+        df = df.astype(float)
+        df.index = pd.to_datetime(df.index)
+        df.sort_index(inplace=True)
 
-    # Fetch stock data
-    params = {
-        "function": "TIME_SERIES_INTRADAY",
-        "symbol": stock_symbol,
-        "interval": "5min",
-        "apikey": API_KEY,
-    }
-    response = requests.get(BASE_URL, params=params)
-    data = response.json()
+        df.rename(columns={
+            "1. open": "Open",
+            "2. high": "High",
+            "3. low": "Low",
+            "4. close": "Close",
+            "5. volume": "Volume"
+        }, inplace=True)
 
-    if not data or "Time Series (5min)" not in data:
-        error_message = data.get("Note", data.get("Error Message", "Invalid API response"))
-        return f"Error fetching data for {stock_symbol}: {error_message}", 400
+        self.data = df
 
+    def calculate_indicators(self):
+        self.fetch_data()
+        df = self.data
+        df["SMA_20"] = df["Close"].rolling(window=20).mean()
+        df["SMA_50"] = df["Close"].rolling(window=50).mean()
+        delta = df["Close"].diff()
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        avg_gain = gain.rolling(window=14).mean()
+        avg_loss = loss.rolling(window=14).mean()
+        rs = avg_gain / avg_loss
+        df["RSI"] = 100 - (100 / (1 + rs))
 
-    # Parse stock data
-    time_series = data["Time Series (5min)"]
-    latest_time = list(time_series.keys())[0]
-    latest_data = time_series[latest_time]
-    stock_info = {
-        "symbol": stock_symbol.upper(),
-        "latest_time": latest_time,
-        "open": latest_data["1. open"],
-        "high": latest_data["2. high"],
-        "low": latest_data["3. low"],
-        "close": latest_data["4. close"],
-        "volume": latest_data["5. volume"],
-    }
+        exp1 = df["Close"].ewm(span=12, adjust=False).mean()
+        exp2 = df["Close"].ewm(span=26, adjust=False).mean()
+        df["MACD"] = exp1 - exp2
+        df["MACD_Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
 
-    return render_template('analysis.html', stock_info=stock_info)
+        self.data = df
 
-if __name__ == '__main__':
-    app.run(debug=False)
+    def plot_stock_data(self):
+        df = self.data
+        fig = go.Figure()
+
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df["Close"], mode="lines", name="Close Price", line=dict(color="cyan")
+        ))
+
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df["SMA_20"], mode="lines", name="SMA 20", line=dict(dash="dash", color="yellow")
+        ))
+
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df["SMA_50"], mode="lines", name="SMA 50", line=dict(dash="dot", color="orange")
+        ))
+
+        fig.update_layout(
+            title=f"{self.symbol} Stock Analysis",
+            xaxis_title="Date",
+            yaxis_title="Price",
+            template="plotly_dark"
+        )
+
+        return fig
